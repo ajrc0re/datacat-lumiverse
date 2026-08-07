@@ -1,0 +1,7 @@
+# Lumiverse builds are committed for install-from-Git compatibility.
+# Do not add local credentials, editor files, or package-manager artifacts.
+.DS_Store
+node_modules/
+*.log
+.env
+.env.*

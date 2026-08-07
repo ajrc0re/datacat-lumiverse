@@ -1,0 +1,16 @@
+{
+  "version": "0.5.46",
+  "name": "Datacat Client",
+  "identifier": "datacat_client_v1",
+  "author": "Datacat",
+  "github": "https://github.com/datacat-run/datacat-lumiverse",
+  "homepage": "https://datacat.run",
+  "description": "Browse and import the full Datacat catalog in Lumiverse.",
+  "permissions": [
+    "characters",
+    "cors_proxy"
+  ],
+  "entry_backend": "dist/backend.js",
+  "entry_frontend": "dist/frontend.js",
+  "minimum_lumiverse_version": "0.1.0"
+}
