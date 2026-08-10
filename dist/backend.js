@@ -1,4 +1,48 @@
 // @bun
+// src/uuidv7.js
+var lastTimestamp = -1;
+var sequence = 0;
+function fillRandomBytes(bytes) {
+  const cryptoApi = globalThis.crypto;
+  if (typeof cryptoApi?.getRandomValues === "function") {
+    try {
+      cryptoApi.getRandomValues(bytes);
+      return;
+    } catch (_) {}
+  }
+  for (let index = 0;index < bytes.length; index += 1) {
+    bytes[index] = Math.floor(Math.random() * 256);
+  }
+}
+function uuidv7() {
+  let timestamp = Math.max(0, Math.floor(Date.now()));
+  if (timestamp > lastTimestamp) {
+    lastTimestamp = timestamp;
+    sequence = 0;
+  } else {
+    timestamp = lastTimestamp;
+    sequence += 1;
+    if (sequence > 4095) {
+      lastTimestamp += 1;
+      timestamp = lastTimestamp;
+      sequence = 0;
+    }
+  }
+  const bytes = new Uint8Array(16);
+  fillRandomBytes(bytes);
+  bytes[0] = Math.floor(timestamp / 1099511627776) & 255;
+  bytes[1] = Math.floor(timestamp / 4294967296) & 255;
+  bytes[2] = Math.floor(timestamp / 16777216) & 255;
+  bytes[3] = Math.floor(timestamp / 65536) & 255;
+  bytes[4] = Math.floor(timestamp / 256) & 255;
+  bytes[5] = timestamp & 255;
+  bytes[6] = 112 | sequence >> 8 & 15;
+  bytes[7] = sequence & 255;
+  bytes[8] = bytes[8] & 63 | 128;
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0"));
+  return `${hex.slice(0, 4).join("")}-${hex.slice(4, 6).join("")}-${hex.slice(6, 8).join("")}-${hex.slice(8, 10).join("")}-${hex.slice(10).join("")}`;
+}
+
 // src/backend.js
 var PAGE_SIZE = 200;
 var CACHE_TTL_MS = 60000;
@@ -6,7 +50,7 @@ var DATACAT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a
 var DEFAULT_DATACAT_ORIGIN = "https://datacat.run";
 var DATACAT_API_PREFIX = "/api/client/v1";
 var DATACAT_CLIENT_ID = "datacat_lumiverse";
-var DATACAT_CLIENT_VERSION = "0.5.46";
+var DATACAT_CLIENT_VERSION = "0.5.47";
 var INSTALLATION_KEY = "datacat.installation_id";
 var ACCESS_TOKEN_KEY = "datacat.access_token";
 var VERIFICATION_LEASE_KEY = "datacat.verification_lease";
@@ -17,7 +61,7 @@ if (!api) {
 var cacheByUser = new Map;
 var scanByUser = new Map;
 function randomInstallationId() {
-  return `lumiverse-${crypto.randomUUID()}`;
+  return `lumiverse-${uuidv7()}`;
 }
 async function getInstallationId(userId) {
   let value = String(await api.enclave.get(INSTALLATION_KEY, userId) || "");

@@ -1,4 +1,6 @@
-const VERSION = "0.5.46";
+import { uuidv7 } from "./uuidv7.js";
+
+const VERSION = "0.5.47";
 const DISPLAY_VERSION = "0.1";
 const PAGE_SIZE = 24;
 const CHAT_LOADING_MIN_MS = 750;
@@ -3238,7 +3240,7 @@ export function setup(ctx) {
   const pendingLinkIndexRequests = new Map();
   datacatBackendRequest = (operation, request = {}) =>
     new Promise((resolve, reject) => {
-      const requestId = crypto.randomUUID();
+      const requestId = uuidv7();
       const timer = window.setTimeout(() => {
         pendingLinkIndexRequests.delete(requestId);
         reject(new Error("The secure Lumiverse Datacat bridge timed out."));
@@ -4830,7 +4832,7 @@ export function setup(ctx) {
         );
       }
     }
-    const requestId = crypto.randomUUID();
+    const requestId = uuidv7();
     return await new Promise((resolve, reject) => {
       const timer = window.setTimeout(() => {
         pendingLinkIndexRequests.delete(requestId);
@@ -4876,7 +4878,7 @@ export function setup(ctx) {
         );
       }
     }
-    const requestId = crypto.randomUUID();
+    const requestId = uuidv7();
     const payload = await new Promise((resolve, reject) => {
       const timer = window.setTimeout(() => {
         pendingLinkIndexRequests.delete(requestId);
