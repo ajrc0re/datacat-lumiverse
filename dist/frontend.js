@@ -3444,13 +3444,34 @@ function setup(ctx) {
     localCharacterModal?.dismiss();
     localCharacterModal = null;
   }
+  function showSafeModal(options) {
+    const modal = ctx.ui.showModal(options);
+    const modalBody = modal.root.parentElement;
+    const modalContainer = modalBody?.parentElement;
+    const modalBackdrop = modalContainer?.parentElement;
+    if (!(modalContainer instanceof HTMLElement) || !(modalBackdrop instanceof HTMLElement)) {
+      return modal;
+    }
+    const safeTop = "var(--app-interactive-safe-top, env(safe-area-inset-top, 0px))";
+    const safeBottom = "env(safe-area-inset-bottom, 0px)";
+    const safeLeft = "env(safe-area-inset-left, 0px)";
+    const safeRight = "env(safe-area-inset-right, 0px)";
+    Object.assign(modalBackdrop.style, {
+      paddingTop: `calc(20px + ${safeTop})`,
+      paddingRight: `calc(20px + ${safeRight})`,
+      paddingBottom: `calc(20px + ${safeBottom})`,
+      paddingLeft: `calc(20px + ${safeLeft})`
+    });
+    modalContainer.style.maxHeight = `min(${modalContainer.style.maxHeight || "100%"}, 100%)`;
+    return modal;
+  }
   async function openLocalCharacterModal(characterId) {
     const id = normalizeId(characterId);
     if (!id)
       return;
     closeLocalCharacterModal();
     const serial = ++localCharacterModalSerial;
-    const modal = ctx.ui.showModal({
+    const modal = showSafeModal({
       title: "Lumiverse Character",
       width: 760,
       maxHeight: Math.max(420, window.innerHeight - 32)
@@ -3568,7 +3589,7 @@ function setup(ctx) {
         content: String(content || "")
       }))
     ];
-    const modal = ctx.ui.showModal({
+    const modal = showSafeModal({
       title: "Choose a greeting",
       width: 620,
       maxHeight: Math.max(420, Math.min(720, window.innerHeight - 32))
@@ -3617,7 +3638,7 @@ function setup(ctx) {
     });
   }
   function showLumiverseChatPicker(characterId, characterName, chats) {
-    const modal = ctx.ui.showModal({
+    const modal = showSafeModal({
       title: `Chats with ${characterName || "character"}`,
       width: 620,
       maxHeight: Math.max(420, Math.min(720, window.innerHeight - 32))
