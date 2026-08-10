@@ -1,6 +1,6 @@
 import { uuidv7 } from "./uuidv7.js";
 
-const VERSION = "0.5.47";
+const VERSION = "0.5.48";
 const DISPLAY_VERSION = "0.1";
 const PAGE_SIZE = 24;
 const CHAT_LOADING_MIN_MS = 750;

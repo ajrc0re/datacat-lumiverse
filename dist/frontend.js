@@ -43,7 +43,7 @@ function uuidv7() {
 }
 
 // src/frontend.js
-var VERSION = "0.5.47";
+var VERSION = "0.5.48";
 var DISPLAY_VERSION = "0.1";
 var PAGE_SIZE = 24;
 var CHAT_LOADING_MIN_MS = 750;
