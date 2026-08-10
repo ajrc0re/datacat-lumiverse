@@ -1,3 +1,5 @@
+import { uuidv7 } from "./uuidv7.js";
+
 const PAGE_SIZE = 200;
 const CACHE_TTL_MS = 60_000;
 const DATACAT_ID_PATTERN =
@@ -19,7 +21,7 @@ const cacheByUser = new Map();
 const scanByUser = new Map();
 
 function randomInstallationId() {
-  return `lumiverse-${crypto.randomUUID()}`;
+  return `lumiverse-${uuidv7()}`;
 }
 
 async function getInstallationId(userId) {
