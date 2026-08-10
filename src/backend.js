@@ -1,3 +1,5 @@
+import { uuidv7 } from "./uuidv7.js";
+
 const PAGE_SIZE = 200;
 const CACHE_TTL_MS = 60_000;
 const DATACAT_ID_PATTERN =
@@ -5,7 +7,7 @@ const DATACAT_ID_PATTERN =
 const DEFAULT_DATACAT_ORIGIN = "https://datacat.run";
 const DATACAT_API_PREFIX = "/api/client/v1";
 const DATACAT_CLIENT_ID = "datacat_lumiverse";
-const DATACAT_CLIENT_VERSION = "0.5.46";
+const DATACAT_CLIENT_VERSION = "0.5.47";
 const INSTALLATION_KEY = "datacat.installation_id";
 const ACCESS_TOKEN_KEY = "datacat.access_token";
 const VERIFICATION_LEASE_KEY = "datacat.verification_lease";
@@ -19,7 +21,7 @@ const cacheByUser = new Map();
 const scanByUser = new Map();
 
 function randomInstallationId() {
-  return `lumiverse-${crypto.randomUUID()}`;
+  return `lumiverse-${uuidv7()}`;
 }
 
 async function getInstallationId(userId) {
