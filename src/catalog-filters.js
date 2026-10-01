@@ -46,15 +46,8 @@ export function matchesMinimumTokens(character, minimumTokens) {
     Number.isFinite(Number(tokens)) && Number(tokens) >= minimumTokens;
 }
 
-export function cardHasLorebook(card) {
-  const book = (card?.data || card)?.character_book;
-  return Array.isArray(book?.entries) && book.entries.some(
-    (entry) => entry && typeof entry === "object" && String(entry.content || "").trim(),
-  );
-}
-
 // Keep the server's cursor even when local filters discard an entire page.
-// Progress retains known matches if a later protected card needs verification.
+// Progress retains matches if a later page fails or is rate limited.
 export async function scanCatalogPages({
   offset = 0,
   pageSize = 24,

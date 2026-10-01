@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
-  cardHasLorebook, changeTagPool, createTagPools, matchesMinimumTokens,
+  changeTagPool, createTagPools, matchesMinimumTokens,
   normalizeMinimumTokens, scanCatalogPages,
 } from "../src/catalog-filters.js";
 
@@ -46,17 +46,6 @@ test("minimum tokens uses an inclusive boundary and rejects unavailable counts",
   expect(matchesMinimumTokens({}, null)).toBe(true);
 });
 
-test("lorebook presence requires nonempty embedded entries in v2/v3 or flat cards", () => {
-  const book = { entries: [{ content: "World lore", enabled: false }] };
-  expect(cardHasLorebook({ spec: "chara_card_v2", data: { character_book: book } })).toBe(true);
-  expect(cardHasLorebook({ spec: "chara_card_v3", data: { character_book: book } })).toBe(true);
-  expect(cardHasLorebook({ character_book: book })).toBe(true);
-  for (const card of [{}, { data: {} }, { data: { character_book: { entries: [] } } },
-    { data: { character_book: { entries: [null, { content: " " }] } } }]) {
-    expect(cardHasLorebook(card)).toBe(false);
-  }
-});
-
 describe("filtered paging", () => {
   test("continues past discarded pages using raw API offsets", async () => {
     const offsets = [];
@@ -88,20 +77,20 @@ describe("filtered paging", () => {
     expect(result).toEqual({ characters: [], nextOffset: 72, hasMore: true, manualMore: true });
   });
 
-  test("preserves matches and the unconsumed page on verification renewal", async () => {
+  test("preserves matches when the next page is rate limited", async () => {
     let progress;
     await expect(scanCatalogPages({
-      fetchPage: async () => ({ characters: [{ id: "known" }, { id: "unchecked" }], paging: { nextOffset: 24, hasMore: false } }),
-      matches: async (character) => {
-        if (character.id === "unchecked") throw new Error("CLIENT_VERIFICATION_REQUIRED");
-        return true;
+      fetchPage: async (offset) => {
+        if (offset === 24) throw new Error("RATE_LIMITED");
+        return { characters: [{ id: "known" }], paging: { nextOffset: 24, hasMore: true } };
       },
+      matches: () => true,
       onProgress: (next) => { progress = next; },
-    })).rejects.toThrow("CLIENT_VERIFICATION_REQUIRED");
-    expect(progress).toEqual({ characters: [{ id: "known" }], nextOffset: 0, hasMore: true });
+    })).rejects.toThrow("RATE_LIMITED");
+    expect(progress).toEqual({ characters: [{ id: "known" }], nextOffset: 24, hasMore: true });
   });
 
-  test("stale responses stop before checking cards or updating progress", async () => {
+  test("stale responses stop before filtering rows or updating progress", async () => {
     let current = true;
     let checked = 0;
     let progressed = 0;
@@ -116,7 +105,7 @@ describe("filtered paging", () => {
     expect(progressed).toBe(0);
   });
 
-  test("stops if the filter changes while card metadata is loading", async () => {
+  test("stops if the filter changes while matching a row", async () => {
     let current = true;
     let progressed = 0;
     const result = await scanCatalogPages({

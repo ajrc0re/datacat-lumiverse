@@ -1,10 +1,10 @@
 import { uuidv7 } from "./uuidv7.js";
 import {
-  cardHasLorebook, changeTagPool, createTagPools, matchesMinimumTokens,
+  changeTagPool, createTagPools, matchesMinimumTokens,
   normalizeMinimumTokens, scanCatalogPages,
 } from "./catalog-filters.js";
 
-const VERSION = "0.5.49";
+const VERSION = "0.5.50";
 const DISPLAY_VERSION = "0.1";
 const PAGE_SIZE = 24;
 const CHAT_LOADING_MIN_MS = 750;
@@ -282,7 +282,7 @@ function publicRequestErrorMessage(
   if (code === "CLIENT_VERIFICATION_REQUIRED") {
     return "Complete the Datacat security check to continue.";
   }
-  if (Number(status) === 429) return "Datacat is busy. Please try again shortly.";
+  if (Number(status) === 429) return "Datacat rate limit reached. Requests are paused.";
   if (Number(status) === 404) return "That Datacat item is no longer available.";
   return fallback;
 }
@@ -2985,9 +2985,8 @@ export function setup(ctx) {
       </div>
       <div class="dcv1-catalog-filters">
         <label>Minimum tokens <input class="dcv1-search" type="number" min="0" step="1" placeholder="Any" data-minimum-tokens></label>
-        <label><input type="checkbox" data-require-lorebook>Require lorebook</label>
-        <span class="dcv1-filter-help">Checks lorebooks embedded in the card. Datacat may ask you to verify again after 20 card checks.</span>
-        <button class="dcv1-button" type="button" data-filter-verify hidden>Verify to check lorebooks</button>
+        <label><input type="checkbox" data-require-lorebook disabled aria-describedby="dcv1-lorebook-unavailable">Require lorebook (unavailable)</label>
+        <span class="dcv1-filter-help" id="dcv1-lorebook-unavailable">Datacat does not provide lorebook presence in catalog results. This filter is unavailable because checking every card consumes the import verification allowance.</span>
       </div>
       <div class="dcv1-tag-groups" data-tag-groups></div>
       <footer class="dcv1-tag-panel-footer">
@@ -3040,8 +3039,6 @@ export function setup(ctx) {
   const tagPoolButtons = [...root.querySelectorAll("[data-tag-pool]")];
   const tagPoolHelp = root.querySelector("[data-tag-pool-help]");
   const minimumTokensInput = root.querySelector("[data-minimum-tokens]");
-  const requireLorebookInput = root.querySelector("[data-require-lorebook]");
-  const filterVerifyButton = root.querySelector("[data-filter-verify]");
   const status = root.querySelector("[data-status]");
   const catalogScroll = root.querySelector("[data-catalog-scroll]");
   const catalogSentinel = root.querySelector("[data-catalog-sentinel]");
@@ -3090,11 +3087,7 @@ export function setup(ctx) {
     error: "",
     loadMoreError: "",
     catalogManualMore: false,
-    lorebookVerificationRequired: false,
-    lorebookChecking: false,
-    lorebookCache: new Map(),
     minimumTokens: normalizeMinimumTokens(persistedBrowserState?.minimumTokens),
-    requireLorebook: persistedBrowserState?.requireLorebook === true,
     freshWindows: {
       last24h: [],
       thisWeek: [],
@@ -3193,7 +3186,9 @@ export function setup(ctx) {
   search.value = state.query;
   tagSearch.value = state.tagQuery;
   minimumTokensInput.value = state.minimumTokens ?? "";
-  requireLorebookInput.checked = state.requireLorebook;
+  // Persist immediately to remove the legacy protected-card scan setting,
+  // including sessions that reload before the normal debounced save.
+  persistBrowserStateNow();
 
   function persistBrowserStateNow() {
     try {
@@ -3210,7 +3205,6 @@ export function setup(ctx) {
           filterTags: [...state.selectedTagIds, ...state.blockedTagIds].map(tagById),
           tagPool: state.tagPool,
           minimumTokens: state.minimumTokens,
-          requireLorebook: state.requireLorebook,
           tagPanelOpen: state.tagPanelOpen,
           tagQuery: state.tagQuery,
           tagSort: state.tagSort,
@@ -3270,8 +3264,7 @@ export function setup(ctx) {
         !state.loadingMore &&
         !state.error &&
         !state.loadMoreError &&
-        !state.catalogManualMore &&
-        !state.lorebookVerificationRequired
+        !state.catalogManualMore
       ) {
         void loadCharacters();
       }
@@ -3491,7 +3484,7 @@ export function setup(ctx) {
     tagPanel.setAttribute("aria-hidden", String(!state.tagPanelOpen));
     tagScrim.dataset.open = String(state.tagPanelOpen);
     tagsToggle.dataset.active = String(
-      state.tagPanelOpen || state.selectedTagIds.size > 0 || state.blockedTagIds.size > 0 || state.minimumTokens !== null || state.requireLorebook,
+      state.tagPanelOpen || state.selectedTagIds.size > 0 || state.blockedTagIds.size > 0 || state.minimumTokens !== null,
     );
     tagsToggle.setAttribute("aria-expanded", String(state.tagPanelOpen));
     const tagCount = state.selectedTagIds.size + state.blockedTagIds.size;
@@ -3509,7 +3502,6 @@ export function setup(ctx) {
     ];
     const qualityChips = [
       ...(state.minimumTokens !== null ? [`<button class="dcv1-chip" type="button" data-minimum-tokens-clear title="Remove minimum token count">≥ ${state.minimumTokens.toLocaleString()} tokens <span aria-hidden="true">×</span></button>`] : []),
-      ...(state.requireLorebook ? ['<button class="dcv1-chip" type="button" data-lorebook-clear title="Remove lorebook requirement">Lorebook <span aria-hidden="true">×</span></button>'] : []),
     ];
     filterChips.hidden =
       state.viewMode !== "catalog" || (selected.length === 0 && qualityChips.length === 0);
@@ -3533,9 +3525,6 @@ export function setup(ctx) {
     tagPoolHelp.textContent = state.tagPool === "block"
       ? "Click tags to exclude any card marked with them"
       : "Click tags to require them on matching cards";
-    filterVerifyButton.hidden = !state.requireLorebook || !state.lorebookVerificationRequired;
-    filterVerifyButton.disabled = state.lorebookChecking;
-    filterVerifyButton.textContent = state.lorebookChecking ? "Checking…" : "Verify to check lorebooks";
     tagSort.textContent =
       state.tagSort === "alpha" ? "A–Z" : "Most used";
     for (const button of tagViewButtons) {
@@ -4839,8 +4828,6 @@ export function setup(ctx) {
     } else {
       if ((state.initializing || state.loading) && state.characters.length === 0) {
         grid.innerHTML = renderLoadingState("Loading the catalog…");
-      } else if (state.lorebookVerificationRequired && state.characters.length === 0) {
-        grid.innerHTML = `<div class="dcv1-empty">Verify with Datacat to inspect card lorebooks.<br><button class="dcv1-button" type="button" data-filter-verify ${state.lorebookChecking ? "disabled" : ""}>Verify to check lorebooks</button></div>`;
       } else if (state.error) {
         grid.innerHTML = `<div class="dcv1-empty" data-error>${escapeHtml(state.error)}</div>`;
       } else if (state.characters.length === 0) {
@@ -4876,8 +4863,6 @@ export function setup(ctx) {
     catalogSentinel.dataset.loading = String(loadingMore);
     catalogSentinel.textContent = loadingMore
       ? "Loading more characters…"
-      : state.viewMode === "catalog" && state.lorebookVerificationRequired
-        ? "Verify to continue checking lorebooks"
       : loadMoreError
         ? `${loadMoreError} Tap to retry.`
         : state.viewMode === "catalog" && state.catalogManualMore
@@ -5217,50 +5202,10 @@ export function setup(ctx) {
   function updateQualityFilters() {
     window.clearTimeout(catalogFilterTimer);
     state.minimumTokens = normalizeMinimumTokens(minimumTokensInput.value);
-    state.requireLorebook = requireLorebookInput.checked;
-    state.lorebookVerificationRequired = false;
     state.viewMode = "catalog";
     scheduleBrowserStateSave();
     renderTagBrowser();
     void loadCharacters({ reset: true });
-  }
-
-  async function checkCatalogCharacter(character, filters) {
-    if (!matchesMinimumTokens(character, filters.minimumTokens)) return false;
-    if (!filters.requireLorebook) return true;
-    const cardPath = characterClientPath(character, "card");
-    if (!cardPath) throw new Error("Datacat did not supply a card path for checking lorebooks.");
-    if (state.lorebookCache.has(cardPath)) return state.lorebookCache.get(cardPath);
-    const card = await datacatFetch(cardPath);
-    const hasLorebook = cardHasLorebook(card);
-    state.lorebookCache.set(cardPath, hasLorebook);
-    return hasLorebook;
-  }
-
-  async function verifyCatalogLorebooks() {
-    if (state.lorebookChecking || !state.requireLorebook) return;
-    const popup = getVerificationLease() ? null : window.open(
-      verificationPopupWaitingUrl(), "datacat-client-verification", "popup=yes,width=560,height=720",
-    );
-    state.lorebookChecking = true;
-    renderTagBrowser();
-    try {
-      await ensureImportVerification("catalog lorebooks", popup);
-      if (state.importFeedback?.tone === "verification") setImportFeedback(null);
-      state.lorebookVerificationRequired = false;
-      state.error = "";
-      state.loadMoreError = "";
-      if (state.requireLorebook) await loadCharacters();
-    } catch (error) {
-      setStatus(publicErrorMessage(error, error.code === "VERIFICATION_POPUP_BLOCKED"
-        ? "Allow pop-ups for Lumiverse to complete the Datacat security check."
-        : "Could not complete the lorebook security check. Try again."), true);
-    } finally {
-      closeVerificationPopup(popup);
-      if (state.importFeedback?.tone === "verification") setImportFeedback(null);
-      state.lorebookChecking = false;
-      render();
-    }
   }
 
   async function loadCharacters({
@@ -5272,7 +5217,6 @@ export function setup(ctx) {
     const isCurrent = () => serial === state.serial;
     const filters = {
       minimumTokens: state.minimumTokens,
-      requireLorebook: state.requireLorebook,
       query: state.query,
       catalogSort: state.catalogSort,
       selectedTagIds: [...state.selectedTagIds],
@@ -5288,7 +5232,6 @@ export function setup(ctx) {
       state.offset = 0;
       state.hasMore = false;
       state.catalogManualMore = false;
-      state.lorebookVerificationRequired = false;
       if (!preserveExisting) state.characters = [];
       catalogScroll.scrollTop = 0;
     } else {
@@ -5299,7 +5242,7 @@ export function setup(ctx) {
       progress = await scanCatalogPages({
         offset: reset ? 0 : state.offset,
         pageSize: PAGE_SIZE,
-        maxPages: filters.minimumTokens !== null || filters.requireLorebook ? 3 : 1,
+        maxPages: filters.minimumTokens !== null ? 3 : 1,
         isCurrent,
         fetchPage: (offset) => {
           const params = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(offset), sort: filters.catalogSort });
@@ -5308,7 +5251,7 @@ export function setup(ctx) {
           if (filters.blockedTagIds.length) params.set("blockedTagIds", filters.blockedTagIds.join(","));
           return datacatFetch(`/characters?${params}`);
         },
-        matches: (character) => checkCatalogCharacter(character, filters),
+        matches: (character) => matchesMinimumTokens(character, filters.minimumTokens),
         onProgress: (next) => { progress = next; },
       });
       if (!isCurrent() || !progress) return;
@@ -5325,16 +5268,6 @@ export function setup(ctx) {
         state.hasMore = progress.hasMore;
       } else if (reset) {
         state.characters = [];
-      }
-      if (error.verificationRequired && filters.requireLorebook) {
-        setVerificationLease(null);
-        state.lorebookVerificationRequired = true;
-        state.hasMore = true;
-        state.catalogManualMore = true;
-        state.loadMoreError = "";
-        state.error = "";
-        setStatus("Verify with Datacat to continue checking lorebooks.");
-        return;
       }
       const message = error.retryAfter
         ? `${publicErrorMessage(error, "Could not load Datacat.")} Retry in ${error.retryAfter}s.`
@@ -6393,10 +6326,6 @@ export function setup(ctx) {
       }
       return;
     }
-    if (event.target === requireLorebookInput) {
-      updateQualityFilters();
-      return;
-    }
     if (event.target === search) {
       state.query = search.value.trim().slice(0, 120);
       searchClear.hidden = !state.query;
@@ -6507,24 +6436,13 @@ export function setup(ctx) {
       tagsToggle.focus();
       return;
     }
-    if (target.closest("[data-filter-verify]")) {
-      void verifyCatalogLorebooks();
-      return;
-    }
     if (target.closest("[data-minimum-tokens-clear]")) {
       minimumTokensInput.value = "";
       updateQualityFilters();
       return;
     }
-    if (target.closest("[data-lorebook-clear]")) {
-      requireLorebookInput.checked = false;
-      updateQualityFilters();
-      return;
-    }
     if (target.closest("[data-catalog-sentinel]")) {
-      if (state.viewMode === "catalog" && state.lorebookVerificationRequired) {
-        void verifyCatalogLorebooks();
-      } else if (
+      if (
         state.viewMode === "fresh" &&
         state.freshLoadMoreError
       ) {

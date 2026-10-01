@@ -43,6 +43,60 @@ function uuidv7() {
   return `${hex.slice(0, 4).join("")}-${hex.slice(4, 6).join("")}-${hex.slice(6, 8).join("")}-${hex.slice(8, 10).join("")}-${hex.slice(10).join("")}`;
 }
 
+// src/request-cooldown.js
+var FALLBACK_RETRY_MS = 60000;
+function retryAfterMilliseconds(headers, now = Date.now()) {
+  const entry = Object.entries(headers || {}).find(([name]) => name.toLowerCase() === "retry-after");
+  const value = String(entry?.[1] ?? "").trim();
+  if (!value)
+    return FALLBACK_RETRY_MS;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds)) {
+    if (seconds < 0 || !Number.isSafeInteger(now + Math.ceil(seconds * 1000)))
+      return FALLBACK_RETRY_MS;
+    return Math.max(1000, Math.ceil(seconds * 1000));
+  }
+  const deadline = Date.parse(value);
+  return Number.isFinite(deadline) && deadline > now ? deadline - now : FALLBACK_RETRY_MS;
+}
+function createRequestCooldown({ load, save, now = Date.now }) {
+  let expiresAt = 0;
+  let loading;
+  let saving = Promise.resolve();
+  async function restore() {
+    loading ??= Promise.resolve().then(load).then((record) => {
+      const deadline = Number(record?.expiresAt);
+      if (Number.isSafeInteger(deadline) && deadline > now())
+        expiresAt = Math.max(expiresAt, deadline);
+    }).catch(() => {});
+    await loading;
+  }
+  return {
+    async blockedResponse() {
+      await restore();
+      const retryAfter = Math.ceil((expiresAt - now()) / 1000);
+      if (retryAfter <= 0)
+        return null;
+      return {
+        status: 429,
+        statusText: "Too Many Requests",
+        headers: { "Retry-After": String(retryAfter) },
+        body: JSON.stringify({ success: false, error: "DATACAT_RATE_LIMITED" }),
+        encoding: null
+      };
+    },
+    async observe(response) {
+      if (Number(response?.status) !== 429)
+        return;
+      await restore();
+      const timestamp = now();
+      expiresAt = Math.max(expiresAt, timestamp + retryAfterMilliseconds(response.headers, timestamp));
+      saving = saving.then(() => save({ expiresAt })).catch(() => {});
+      await saving;
+    }
+  };
+}
+
 // src/backend.js
 var PAGE_SIZE = 200;
 var CACHE_TTL_MS = 60000;
@@ -50,7 +104,7 @@ var DATACAT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a
 var DEFAULT_DATACAT_ORIGIN = "https://datacat.run";
 var DATACAT_API_PREFIX = "/api/client/v1";
 var DATACAT_CLIENT_ID = "datacat_lumiverse";
-var DATACAT_CLIENT_VERSION = "0.5.49";
+var DATACAT_CLIENT_VERSION = "0.5.50";
 var INSTALLATION_KEY = "datacat.installation_id";
 var ACCESS_TOKEN_KEY = "datacat.access_token";
 var VERIFICATION_LEASE_KEY = "datacat.verification_lease";
@@ -60,6 +114,10 @@ if (!api) {
 }
 var cacheByUser = new Map;
 var scanByUser = new Map;
+var requestCooldown = createRequestCooldown({
+  load: () => api.storage.getJson("datacat-cooldown.json", { fallback: null }),
+  save: (record) => api.storage.setJson("datacat-cooldown.json", record)
+});
 function randomInstallationId() {
   return `lumiverse-${uuidv7()}`;
 }
@@ -138,6 +196,9 @@ async function runDatacatRequest(payload, userId) {
   if (!isAllowedDatacatPath(path, method)) {
     throw new Error("This Datacat request is not available to the extension.");
   }
+  const blocked = await requestCooldown.blockedResponse();
+  if (blocked)
+    return blocked;
   const installationId = await getInstallationId(userId);
   const accessToken = String(await api.enclave.get(ACCESS_TOKEN_KEY, userId) || "").trim();
   const headers = {
@@ -182,6 +243,9 @@ async function runDatacatRequest(payload, userId) {
     if (lease)
       headers["X-Datacat-Verification-Lease"] = lease.token;
   }
+  const blockedBeforeSend = await requestCooldown.blockedResponse();
+  if (blockedBeforeSend)
+    return blockedBeforeSend;
   const response = await api.cors(`${DEFAULT_DATACAT_ORIGIN}${DATACAT_API_PREFIX}${path}`, {
     method,
     headers,
@@ -195,6 +259,12 @@ async function runDatacatRequest(payload, userId) {
     body: response?.body ?? "",
     encoding: response?.encoding || null
   };
+  await requestCooldown.observe(result);
+  if (result.status === 429) {
+    const cooldownResponse = await requestCooldown.blockedResponse();
+    if (cooldownResponse)
+      return cooldownResponse;
+  }
   if (payload?.responseType !== "arraybuffer") {
     const responseBody = parseJson(result.body);
     if (result.status >= 200 && result.status < 300) {

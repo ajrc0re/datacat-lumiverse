@@ -1,4 +1,5 @@
 import { uuidv7 } from "./uuidv7.js";
+import { createRequestCooldown } from "./request-cooldown.js";
 
 const PAGE_SIZE = 200;
 const CACHE_TTL_MS = 60_000;
@@ -7,7 +8,7 @@ const DATACAT_ID_PATTERN =
 const DEFAULT_DATACAT_ORIGIN = "https://datacat.run";
 const DATACAT_API_PREFIX = "/api/client/v1";
 const DATACAT_CLIENT_ID = "datacat_lumiverse";
-const DATACAT_CLIENT_VERSION = "0.5.49";
+const DATACAT_CLIENT_VERSION = "0.5.50";
 const INSTALLATION_KEY = "datacat.installation_id";
 const ACCESS_TOKEN_KEY = "datacat.access_token";
 const VERIFICATION_LEASE_KEY = "datacat.verification_lease";
@@ -19,6 +20,10 @@ if (!api) {
 
 const cacheByUser = new Map();
 const scanByUser = new Map();
+const requestCooldown = createRequestCooldown({
+  load: () => api.storage.getJson("datacat-cooldown.json", { fallback: null }),
+  save: (record) => api.storage.setJson("datacat-cooldown.json", record),
+});
 
 function randomInstallationId() {
   return `lumiverse-${uuidv7()}`;
@@ -113,6 +118,8 @@ async function runDatacatRequest(payload, userId) {
   if (!isAllowedDatacatPath(path, method)) {
     throw new Error("This Datacat request is not available to the extension.");
   }
+  const blocked = await requestCooldown.blockedResponse();
+  if (blocked) return blocked;
   const installationId = await getInstallationId(userId);
   const accessToken = String(
     (await api.enclave.get(ACCESS_TOKEN_KEY, userId)) || "",
@@ -164,6 +171,9 @@ async function runDatacatRequest(payload, userId) {
     if (lease) headers["X-Datacat-Verification-Lease"] = lease.token;
   }
 
+  // Another concurrent request may have hit the limit while credentials loaded.
+  const blockedBeforeSend = await requestCooldown.blockedResponse();
+  if (blockedBeforeSend) return blockedBeforeSend;
   const response = await api.cors(`${DEFAULT_DATACAT_ORIGIN}${DATACAT_API_PREFIX}${path}`, {
     method,
     headers,
@@ -181,6 +191,11 @@ async function runDatacatRequest(payload, userId) {
     body: response?.body ?? "",
     encoding: response?.encoding || null,
   };
+  await requestCooldown.observe(result);
+  if (result.status === 429) {
+    const cooldownResponse = await requestCooldown.blockedResponse();
+    if (cooldownResponse) return cooldownResponse;
+  }
   if (payload?.responseType !== "arraybuffer") {
     const responseBody = parseJson(result.body);
     if (result.status >= 200 && result.status < 300) {

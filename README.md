@@ -13,9 +13,8 @@ you want, import it, and start chatting without leaving your app.
 - In the Tags drawer, switch between **Include** and **Block** beside List/Cloud.
   Include requires every selected tag; Block hides cards with any blocked tag.
   Selecting a tag in the other pool moves it there. Both pools work together.
-- Set **Minimum tokens** to hide shorter cards, or turn on **Require lorebook**
-  to keep cards containing an embedded lorebook with nonempty entries. Clear
-  either filter with its chip above the catalog. Filters survive a page reload.
+- Set **Minimum tokens** to hide shorter cards. Clear the filter with its chip
+  above the catalog. Tag and token filters survive a page reload.
 - Import a character directly into Lumiverse, then open a chat immediately.
 - Keep track of your most recent imports in one compact list.
 - Leave kudos and comments through your connected Datacat account.
@@ -34,13 +33,17 @@ continue browsing and importing normally.
 
 Datacat's Client API does not currently expose token filtering or lorebook
 availability in discovery results. Minimum tokens uses the reported total token
-count while continuing through server pages. Require lorebook checks card JSON
-through the existing protected card endpoint and caches only the result for the
-current browser session. Use **Verify to check lorebooks** when prompted; these
-checks share Datacat's card-transfer allowance (currently 20 distinct characters
-per verification lease). Standalone lorebooks that are not embedded in the card
-are not counted. The extension scans up to three catalog pages at a time; use
-**Load more matching cards** to continue a sparse search.
+count while continuing through server pages. **Require lorebook** is disabled
+until the Client API provides lorebook presence in discovery metadata. Browsing
+does not download protected cards or request import verification. Earlier saved
+lorebook filters are cleared automatically. The extension scans up to three
+catalog pages at a time; use **Load more matching cards** to continue a sparse
+token search.
+
+If Datacat returns a rate-limit response, the backend pauses requests until its
+`Retry-After` expires (60 seconds if the response supplies no valid deadline).
+The cooldown survives page reloads, account switches, and extension restarts.
+It cannot clear a block that Datacat has already imposed.
 
 ## For app and extension developers
 
