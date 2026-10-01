@@ -42,8 +42,91 @@ function uuidv7() {
   return `${hex.slice(0, 4).join("")}-${hex.slice(4, 6).join("")}-${hex.slice(6, 8).join("")}-${hex.slice(8, 10).join("")}-${hex.slice(10).join("")}`;
 }
 
+// src/catalog-filters.js
+var TAG_POOL_LIMITS = Object.freeze({ include: 24, block: 50 });
+function normalizeTagIds(values, limit = TAG_POOL_LIMITS.include) {
+  return new Set([...new Set((Array.isArray(values) || values instanceof Set ? [...values] : []).map(Number).filter((id) => Number.isSafeInteger(id) && id > 0))].slice(0, limit));
+}
+function normalizeMinimumTokens(value) {
+  if (String(value ?? "").trim() === "")
+    return null;
+  const number = Number(value);
+  return Number.isSafeInteger(number) && number >= 0 ? number : null;
+}
+function createTagPools(included, blocked) {
+  const blockedTagIds = normalizeTagIds(blocked, TAG_POOL_LIMITS.block);
+  const selectedTagIds = normalizeTagIds(included);
+  for (const id of blockedTagIds)
+    selectedTagIds.delete(id);
+  return { selectedTagIds, blockedTagIds };
+}
+function changeTagPool(pools, tagId, pool, { remove = false, toggle = true } = {}) {
+  const id = Number(tagId);
+  if (!Number.isSafeInteger(id) || id <= 0)
+    return pools;
+  const next = createTagPools([...pools.selectedTagIds], [...pools.blockedTagIds]);
+  const target = pool === "block" ? next.blockedTagIds : next.selectedTagIds;
+  const other = pool === "block" ? next.selectedTagIds : next.blockedTagIds;
+  if (remove || toggle && target.has(id)) {
+    target.delete(id);
+  } else {
+    if (!target.has(id) && target.size >= TAG_POOL_LIMITS[pool === "block" ? "block" : "include"]) {
+      throw new Error(`You can ${pool === "block" ? "block" : "include"} up to ${TAG_POOL_LIMITS[pool === "block" ? "block" : "include"]} tags.`);
+    }
+    target.add(id);
+    other.delete(id);
+  }
+  return next;
+}
+function matchesMinimumTokens(character, minimumTokens) {
+  if (minimumTokens === null)
+    return true;
+  const tokens = character?.totalTokens;
+  return tokens !== null && tokens !== undefined && tokens !== "" && Number.isFinite(Number(tokens)) && Number(tokens) >= minimumTokens;
+}
+function cardHasLorebook(card) {
+  const book = (card?.data || card)?.character_book;
+  return Array.isArray(book?.entries) && book.entries.some((entry) => entry && typeof entry === "object" && String(entry.content || "").trim());
+}
+async function scanCatalogPages({
+  offset = 0,
+  pageSize = 24,
+  maxPages = 3,
+  fetchPage,
+  matches,
+  isCurrent = () => true,
+  onProgress = () => {}
+}) {
+  const characters = [];
+  let hasMore = true;
+  for (let page = 0;page < maxPages; page += 1) {
+    const payload = await fetchPage(offset);
+    if (!isCurrent())
+      return null;
+    const rows = Array.isArray(payload.characters) ? payload.characters : [];
+    for (const character of rows) {
+      const accepted = await matches(character);
+      if (!isCurrent())
+        return null;
+      if (accepted)
+        characters.push(character);
+      onProgress({ characters: [...characters], nextOffset: offset, hasMore: true });
+    }
+    const nextOffset = Number(payload.paging?.nextOffset ?? offset + rows.length);
+    hasMore = payload.paging?.hasMore === true;
+    if (!Number.isSafeInteger(nextOffset) || nextOffset < offset || hasMore && nextOffset === offset) {
+      throw new Error("Datacat returned an invalid catalog page cursor.");
+    }
+    offset = nextOffset;
+    onProgress({ characters: [...characters], nextOffset: offset, hasMore });
+    if (!hasMore || characters.length >= pageSize)
+      break;
+  }
+  return { characters, nextOffset: offset, hasMore, manualMore: hasMore && characters.length < pageSize };
+}
+
 // src/frontend.js
-var VERSION = "0.5.48";
+var VERSION = "0.5.49";
 var DISPLAY_VERSION = "0.1";
 var PAGE_SIZE = 24;
 var CHAT_LOADING_MIN_MS = 750;
@@ -204,6 +287,18 @@ function loadTagViewMode() {
 function saveTagViewMode(mode) {
   try {
     localStorage.setItem(storageKey("tag_view"), mode === "list" ? "list" : "cloud");
+  } catch (_) {}
+}
+function loadTagPoolMode() {
+  try {
+    return localStorage.getItem(storageKey("tag_pool")) === "block" ? "block" : "include";
+  } catch (_) {
+    return "include";
+  }
+}
+function saveTagPoolMode(mode) {
+  try {
+    localStorage.setItem(storageKey("tag_pool"), mode === "block" ? "block" : "include");
   } catch (_) {}
 }
 function getVerificationLease() {
@@ -986,6 +1081,13 @@ function setup(ctx) {
       background: rgba(246, 200, 76, .16);
     }
     .dcv1-chip:hover { background: #ffda67; }
+    .dcv1-chip[data-pool="block"],
+    .dcv1-tag-panel [data-tag-id][data-blocked="true"] {
+      color: #ffc3c3;
+      border-color: rgba(248, 113, 113, .7);
+      background: rgba(248, 113, 113, .16);
+      box-shadow: none;
+    }
     .dcv1-tag-count {
       color: var(--dc-muted);
       font-size: 11px;
@@ -1063,10 +1165,31 @@ function setup(ctx) {
     .dcv1-tag-tools {
       flex: 0 0 auto;
       display: grid;
-      grid-template-columns: minmax(0, 1fr) auto auto;
+      grid-template-columns: auto minmax(0, 1fr);
       gap: 6px;
       padding: 8px;
     }
+    .dcv1-tag-tools > .dcv1-search { grid-column: 1 / -1; }
+    .dcv1-tag-toggles {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      gap: 6px;
+    }
+    .dcv1-catalog-filters {
+      flex: 0 0 auto;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px 12px;
+      padding: 0 8px 8px;
+      color: var(--dc-muted);
+      font-size: 11px;
+    }
+    .dcv1-catalog-filters label { display: inline-flex; align-items: center; gap: 6px; }
+    .dcv1-catalog-filters input[type="number"] { width: 90px; min-width: 0; }
+    .dcv1-catalog-filters input[type="checkbox"] { accent-color: var(--dc-yellow); }
+    .dcv1-filter-help { flex-basis: 100%; font-size: 10px; line-height: 1.4; }
     .dcv1-tag-view-toggle {
       display: inline-flex;
       align-items: center;
@@ -2860,16 +2983,28 @@ function setup(ctx) {
     <aside class="dcv1-tag-panel" data-tag-panel data-open="false" aria-hidden="true" aria-label="Browse Datacat tags">
       <header class="dcv1-tag-drawer-head">
         <span class="dcv1-tag-drawer-handle" aria-hidden="true"></span>
-        <div class="dcv1-tag-drawer-title">Browse tags<span>Choose multiple tags to narrow the catalog</span></div>
+        <div class="dcv1-tag-drawer-title">Filter catalog<span data-tag-pool-help>Click tags to require them on matching cards</span></div>
         <button class="dcv1-button" type="button" data-tags-close>Close</button>
       </header>
       <div class="dcv1-tag-tools">
         <input class="dcv1-search" type="search" placeholder="Find tags" autocomplete="off" data-tag-search>
         <button class="dcv1-button" type="button" data-tag-sort>Most used</button>
-        <div class="dcv1-tag-view-toggle" role="group" aria-label="Tag view">
-          <button type="button" data-tag-view="list">List</button>
-          <button type="button" data-tag-view="cloud">Cloud</button>
+        <div class="dcv1-tag-toggles">
+          <div class="dcv1-tag-view-toggle" role="group" aria-label="Tag view">
+            <button type="button" data-tag-view="list">List</button>
+            <button type="button" data-tag-view="cloud">Cloud</button>
+          </div>
+          <div class="dcv1-tag-view-toggle" role="group" aria-label="Add tags to">
+            <button type="button" data-tag-pool="include">Include</button>
+            <button type="button" data-tag-pool="block">Block</button>
+          </div>
         </div>
+      </div>
+      <div class="dcv1-catalog-filters">
+        <label>Minimum tokens <input class="dcv1-search" type="number" min="0" step="1" placeholder="Any" data-minimum-tokens></label>
+        <label><input type="checkbox" data-require-lorebook>Require lorebook</label>
+        <span class="dcv1-filter-help">Checks lorebooks embedded in the card. Datacat may ask you to verify again after 20 card checks.</span>
+        <button class="dcv1-button" type="button" data-filter-verify hidden>Verify to check lorebooks</button>
       </div>
       <div class="dcv1-tag-groups" data-tag-groups></div>
       <footer class="dcv1-tag-panel-footer">
@@ -2918,6 +3053,11 @@ function setup(ctx) {
   const tagViewButtons = [
     ...root.querySelectorAll("[data-tag-view]")
   ];
+  const tagPoolButtons = [...root.querySelectorAll("[data-tag-pool]")];
+  const tagPoolHelp = root.querySelector("[data-tag-pool-help]");
+  const minimumTokensInput = root.querySelector("[data-minimum-tokens]");
+  const requireLorebookInput = root.querySelector("[data-require-lorebook]");
+  const filterVerifyButton = root.querySelector("[data-filter-verify]");
   const status = root.querySelector("[data-status]");
   const catalogScroll = root.querySelector("[data-catalog-scroll]");
   const catalogSentinel = root.querySelector("[data-catalog-sentinel]");
@@ -2952,6 +3092,12 @@ function setup(ctx) {
     loadingMore: false,
     error: "",
     loadMoreError: "",
+    catalogManualMore: false,
+    lorebookVerificationRequired: false,
+    lorebookChecking: false,
+    lorebookCache: new Map,
+    minimumTokens: normalizeMinimumTokens(persistedBrowserState?.minimumTokens),
+    requireLorebook: persistedBrowserState?.requireLorebook === true,
     freshWindows: {
       last24h: [],
       thisWeek: []
@@ -2989,7 +3135,9 @@ function setup(ctx) {
     creatorTagSlugs: new Set,
     tags: [],
     tagGroups: [],
-    selectedTagIds: new Set(Array.isArray(persistedBrowserState?.selectedTagIds) ? persistedBrowserState.selectedTagIds.map(Number).filter((id) => Number.isFinite(id) && id > 0) : []),
+    ...createTagPools(persistedBrowserState?.selectedTagIds, persistedBrowserState?.blockedTagIds),
+    tagDetails: new Map((Array.isArray(persistedBrowserState?.filterTags) ? persistedBrowserState.filterTags : []).filter((tag) => Number.isSafeInteger(Number(tag?.id)) && Number(tag.id) > 0).map((tag) => [Number(tag.id), { id: Number(tag.id), name: String(tag.name || ""), slug: String(tag.slug || "") }])),
+    tagPool: ["include", "block"].includes(persistedBrowserState?.tagPool) ? persistedBrowserState.tagPool : loadTagPoolMode(),
     tagPanelOpen: persistedBrowserState?.tagPanelOpen === true,
     tagQuery: String(persistedBrowserState?.tagQuery || "").slice(0, 80),
     tagSort: persistedBrowserState?.tagSort === "alpha" ? "alpha" : "count",
@@ -3018,6 +3166,7 @@ function setup(ctx) {
   };
   let searchTimer = 0;
   let tagSearchTimer = 0;
+  let catalogFilterTimer = 0;
   let linkPollTimer = 0;
   let verificationPollTimer = 0;
   let verificationPromise = null;
@@ -3034,6 +3183,8 @@ function setup(ctx) {
   let localCharacterModalSerial = 0;
   search.value = state.query;
   tagSearch.value = state.tagQuery;
+  minimumTokensInput.value = state.minimumTokens ?? "";
+  requireLorebookInput.checked = state.requireLorebook;
   function persistBrowserStateNow() {
     try {
       sessionStorage.setItem(BROWSER_STATE_KEY, JSON.stringify({
@@ -3043,6 +3194,11 @@ function setup(ctx) {
         query: state.query,
         catalogSort: state.catalogSort,
         selectedTagIds: [...state.selectedTagIds],
+        blockedTagIds: [...state.blockedTagIds],
+        filterTags: [...state.selectedTagIds, ...state.blockedTagIds].map(tagById),
+        tagPool: state.tagPool,
+        minimumTokens: state.minimumTokens,
+        requireLorebook: state.requireLorebook,
         tagPanelOpen: state.tagPanelOpen,
         tagQuery: state.tagQuery,
         tagSort: state.tagSort,
@@ -3080,7 +3236,7 @@ function setup(ctx) {
       }
       return;
     }
-    if (state.hasMore && !state.loading && !state.loadingMore && !state.error && !state.loadMoreError) {
+    if (state.hasMore && !state.loading && !state.loadingMore && !state.error && !state.loadMoreError && !state.catalogManualMore && !state.lorebookVerificationRequired) {
       loadCharacters();
     }
   }, {
@@ -3232,30 +3388,50 @@ function setup(ctx) {
   }
   function tagById(tagId) {
     const id = Number(tagId);
-    return state.tags.find((tag) => Number(tag.id) === id) || null;
+    return state.tagDetails.get(id) || state.tags.find((tag) => Number(tag.id) === id) || { id, name: `Tag #${id}` };
   }
-  function selectedTags() {
-    return [...state.selectedTagIds].map(tagById).filter(Boolean);
+  function tagSelectionAttributes(id) {
+    const blocked = state.blockedTagIds.has(id);
+    const included = state.selectedTagIds.has(id);
+    const active = (state.tagPool === "block" ? state.blockedTagIds : state.selectedTagIds).has(id);
+    return `data-selected="${included || blocked}" data-blocked="${blocked}" aria-pressed="${active}" title="${blocked ? "Blocked" : included ? "Included" : "Unselected"}; click to ${active ? "remove" : state.tagPool === "block" ? "block" : "include"}"`;
   }
   function syncTagPanelVisibility() {
     tagPanel.dataset.open = String(state.tagPanelOpen);
     tagPanel.setAttribute("aria-hidden", String(!state.tagPanelOpen));
     tagScrim.dataset.open = String(state.tagPanelOpen);
-    tagsToggle.dataset.active = String(state.tagPanelOpen || state.selectedTagIds.size > 0);
+    tagsToggle.dataset.active = String(state.tagPanelOpen || state.selectedTagIds.size > 0 || state.blockedTagIds.size > 0 || state.minimumTokens !== null || state.requireLorebook);
     tagsToggle.setAttribute("aria-expanded", String(state.tagPanelOpen));
-    tagsToggle.textContent = state.selectedTagIds.size ? `Tags (${state.selectedTagIds.size})` : "Tags";
+    const tagCount = state.selectedTagIds.size + state.blockedTagIds.size;
+    tagsToggle.textContent = tagCount ? `Tags (${tagCount})` : "Tags";
   }
   function renderTagBrowser() {
     const previousScrollTop = tagGroups.scrollTop;
     syncTagPanelVisibility();
-    const selected = selectedTags();
-    filterChips.hidden = state.viewMode !== "catalog" || selected.length === 0;
-    filterChips.innerHTML = selected.length ? `${selected.map((tag) => `
-              <button class="dcv1-chip" type="button" data-tag-remove="${Number(tag.id)}" title="Remove ${escapeAttribute(tag.name)}">
-                ${escapeHtml(tag.name)}
+    const selected = [
+      ...[...state.selectedTagIds].map((id) => ({ ...tagById(id), pool: "include" })),
+      ...[...state.blockedTagIds].map((id) => ({ ...tagById(id), pool: "block" }))
+    ];
+    const qualityChips = [
+      ...state.minimumTokens !== null ? [`<button class="dcv1-chip" type="button" data-minimum-tokens-clear title="Remove minimum token count">≥ ${state.minimumTokens.toLocaleString()} tokens <span aria-hidden="true">×</span></button>`] : [],
+      ...state.requireLorebook ? ['<button class="dcv1-chip" type="button" data-lorebook-clear title="Remove lorebook requirement">Lorebook <span aria-hidden="true">×</span></button>'] : []
+    ];
+    filterChips.hidden = state.viewMode !== "catalog" || selected.length === 0 && qualityChips.length === 0;
+    filterChips.innerHTML = (selected.length ? `${selected.map((tag) => `
+              <button class="dcv1-chip" type="button" data-tag-remove="${Number(tag.id)}" data-pool="${tag.pool}" title="Remove ${tag.pool === "block" ? "blocked" : "included"} tag ${escapeAttribute(tag.name)}">
+                ${tag.pool === "block" ? "Block: " : ""}${escapeHtml(tag.name)}
                 <span aria-hidden="true">×</span>
               </button>`).join("")}
-         <button class="dcv1-tag" type="button" data-tags-clear>Clear tags</button>` : "";
+         <button class="dcv1-tag" type="button" data-tags-clear>Clear tags</button>` : "") + qualityChips.join("");
+    for (const button of tagPoolButtons) {
+      const active = button.dataset.tagPool === state.tagPool;
+      button.dataset.active = String(active);
+      button.setAttribute("aria-pressed", String(active));
+    }
+    tagPoolHelp.textContent = state.tagPool === "block" ? "Click tags to exclude any card marked with them" : "Click tags to require them on matching cards";
+    filterVerifyButton.hidden = !state.requireLorebook || !state.lorebookVerificationRequired;
+    filterVerifyButton.disabled = state.lorebookChecking;
+    filterVerifyButton.textContent = state.lorebookChecking ? "Checking…" : "Verify to check lorebooks";
     tagSort.textContent = state.tagSort === "alpha" ? "A–Z" : "Most used";
     for (const button of tagViewButtons) {
       const active = button.dataset.tagView === state.tagView;
@@ -3293,7 +3469,7 @@ function setup(ctx) {
     let content = "";
     if (state.tagView === "cloud" && state.tags.length > 0) {
       const cloudTags = [...state.tags].sort((a, b) => {
-        const selectedDelta = Number(state.selectedTagIds.has(Number(b.id))) - Number(state.selectedTagIds.has(Number(a.id)));
+        const selectedDelta = Number(state.selectedTagIds.has(Number(b.id)) || state.blockedTagIds.has(Number(b.id))) - Number(state.selectedTagIds.has(Number(a.id)) || state.blockedTagIds.has(Number(a.id)));
         if (selectedDelta)
           return selectedDelta;
         return state.tagSort === "alpha" ? String(a.name || "").localeCompare(String(b.name || "")) : Number(b.count || 0) - Number(a.count || 0) || String(a.name || "").localeCompare(String(b.name || ""));
@@ -3304,7 +3480,7 @@ function setup(ctx) {
           ${cloudTags.map((tag) => {
         const heat = Math.max(0, Math.min(1, Number(tag.count || 0) / maxCount)).toFixed(3);
         return `
-                <button class="dcv1-tag-cloud-item" type="button" data-tag-id="${Number(tag.id)}" data-selected="${state.selectedTagIds.has(Number(tag.id))}" style="--heat:${heat}">
+                <button class="dcv1-tag-cloud-item" type="button" data-tag-id="${Number(tag.id)}" ${tagSelectionAttributes(Number(tag.id))} style="--heat:${heat}">
                   <span>${escapeHtml(tag.name)}</span>
                   <span class="dcv1-tag-count">${compactNumber(tag.count)}</span>
                 </button>`;
@@ -3318,7 +3494,7 @@ function setup(ctx) {
               <div class="dcv1-tag-group-title">${escapeHtml(group?.name || "Other")}</div>
               <div class="dcv1-tag-list">
                 ${tags.map((tag) => `
-                      <button class="dcv1-tag" type="button" data-tag-id="${Number(tag.id)}" data-selected="${state.selectedTagIds.has(Number(tag.id))}">
+                      <button class="dcv1-tag" type="button" data-tag-id="${Number(tag.id)}" ${tagSelectionAttributes(Number(tag.id))}>
                         <span>${escapeHtml(tag.name)}</span>
                         <span class="dcv1-tag-count">${compactNumber(tag.count)}</span>
                       </button>`).join("")}
@@ -4250,10 +4426,12 @@ function setup(ctx) {
     } else {
       if ((state.initializing || state.loading) && state.characters.length === 0) {
         grid.innerHTML = renderLoadingState("Loading the catalog…");
+      } else if (state.lorebookVerificationRequired && state.characters.length === 0) {
+        grid.innerHTML = `<div class="dcv1-empty">Verify with Datacat to inspect card lorebooks.<br><button class="dcv1-button" type="button" data-filter-verify ${state.lorebookChecking ? "disabled" : ""}>Verify to check lorebooks</button></div>`;
       } else if (state.error) {
         grid.innerHTML = `<div class="dcv1-empty" data-error>${escapeHtml(state.error)}</div>`;
       } else if (state.characters.length === 0) {
-        grid.innerHTML = `<div class="dcv1-empty">No characters found.</div>`;
+        grid.innerHTML = `<div class="dcv1-empty">${state.hasMore ? "No matching cards in the pages checked so far. Load more to continue." : "No characters found."}</div>`;
       } else {
         grid.innerHTML = state.characters.map(renderCard).join("");
       }
@@ -4264,9 +4442,9 @@ function setup(ctx) {
     const loadMoreError = isImports ? "" : isFresh ? state.freshLoadMoreError : state.loadMoreError;
     const error = isImports ? state.savedError : isFresh ? state.freshError : state.error;
     catalogSentinel.hidden = !hasMore || Boolean(error);
-    catalogSentinel.disabled = loading || loadingMore || !loadMoreError;
+    catalogSentinel.disabled = loading || loadingMore || !loadMoreError && !(state.viewMode === "catalog" && state.catalogManualMore);
     catalogSentinel.dataset.loading = String(loadingMore);
-    catalogSentinel.textContent = loadingMore ? "Loading more characters…" : loadMoreError ? `${loadMoreError} Tap to retry.` : "Scroll for more";
+    catalogSentinel.textContent = loadingMore ? "Loading more characters…" : state.viewMode === "catalog" && state.lorebookVerificationRequired ? "Verify to continue checking lorebooks" : loadMoreError ? `${loadMoreError} Tap to retry.` : state.viewMode === "catalog" && state.catalogManualMore ? "Load more matching cards" : "Scroll for more";
     const accountName = state.linkedAccount?.displayName || state.linkedAccount?.username || "Datacat";
     const loggedIn = state.accountState === "logged_in" && Boolean(state.linkedAccount);
     const linkedAnonymous = state.accountState === "linked_anonymous";
@@ -4420,12 +4598,13 @@ function setup(ctx) {
     await Promise.all(loads);
   }
   async function loadTags({ reset = false } = {}) {
-    if (state.tagLoading || state.tagLoadingMore)
+    if (!reset && (state.tagLoading || state.tagLoadingMore))
       return;
     const serial = ++state.tagSerial;
     state.tagError = "";
     if (reset) {
       state.tagLoading = true;
+      state.tagLoadingMore = false;
       state.tagHasMore = false;
       state.tagTotal = 0;
       tagGroups.scrollTop = 0;
@@ -4445,10 +4624,15 @@ function setup(ctx) {
       if (state.selectedTagIds.size) {
         params.set("activeTagIds", [...state.selectedTagIds].join(","));
       }
+      if (state.blockedTagIds.size) {
+        params.set("blockedTagIds", [...state.blockedTagIds].join(","));
+      }
       const payload = await datacatFetch(`/tags?${params}`);
       if (serial !== state.tagSerial)
         return;
       const rows = Array.isArray(payload.tags) ? payload.tags : [];
+      for (const tag of rows)
+        state.tagDetails.set(Number(tag.id), tag);
       const merged = reset ? rows : [...state.tags, ...rows];
       state.tags = [...new Map(merged.map((tag) => [Number(tag.id), tag])).values()];
       state.tagGroups = Array.isArray(payload.groups) ? payload.groups : state.tagGroups;
@@ -4456,15 +4640,19 @@ function setup(ctx) {
       state.tagTotal = Math.max(state.tags.length, Number(payload.paging?.totalCount || 0));
       state.tagHasMore = payload.paging?.hasMore === true;
     } catch (error) {
+      if (serial !== state.tagSerial)
+        return;
       state.tagError = error.retryAfter ? `${publicErrorMessage(error, "Could not load Datacat tags.")} Retry in ${error.retryAfter}s.` : publicErrorMessage(error, "Could not load Datacat tags.");
     } finally {
-      state.tagLoading = false;
-      state.tagLoadingMore = false;
-      renderTagBrowser();
+      if (serial === state.tagSerial) {
+        state.tagLoading = false;
+        state.tagLoadingMore = false;
+        renderTagBrowser();
+      }
     }
   }
-  async function updateSelectedTags(nextIds) {
-    state.selectedTagIds = new Set([...nextIds].map(Number).filter((id) => Number.isFinite(id) && id > 0));
+  async function updateSelectedTags(pools) {
+    Object.assign(state, createTagPools([...pools.selectedTagIds], [...pools.blockedTagIds]));
     state.selectedSerial += 1;
     state.selected = null;
     state.selectedLoading = false;
@@ -4472,6 +4660,8 @@ function setup(ctx) {
     state.selectedCreator = null;
     state.selectedCreatorRef = "";
     state.creatorCharacters = [];
+    scheduleBrowserStateSave();
+    renderTagBrowser();
     renderProfile();
     await Promise.all([
       loadTags({ reset: true }),
@@ -4493,6 +4683,8 @@ function setup(ctx) {
         });
         const payload = await datacatFetch(`/tags?${params}`);
         const rows = Array.isArray(payload.tags) ? payload.tags : [];
+        for (const item of rows)
+          state.tagDetails.set(Number(item.id), item);
         state.tags = [...new Map([...state.tags, ...rows].map((item) => [Number(item.id), item])).values()];
         if (Array.isArray(payload.groups))
           state.tagGroups = payload.groups;
@@ -4508,22 +4700,91 @@ function setup(ctx) {
     }
     state.viewMode = "catalog";
     state.tagPanelOpen = true;
-    const next = new Set(state.selectedTagIds);
-    next.add(Number(tag.id));
-    await updateSelectedTags(next);
+    try {
+      await updateSelectedTags(changeTagPool(state, tag.id, state.tagPool, { toggle: false }));
+    } catch (error) {
+      setStatus(error.message, true);
+    }
+  }
+  function updateQualityFilters() {
+    window.clearTimeout(catalogFilterTimer);
+    state.minimumTokens = normalizeMinimumTokens(minimumTokensInput.value);
+    state.requireLorebook = requireLorebookInput.checked;
+    state.lorebookVerificationRequired = false;
+    state.viewMode = "catalog";
+    scheduleBrowserStateSave();
+    renderTagBrowser();
+    loadCharacters({ reset: true });
+  }
+  async function checkCatalogCharacter(character, filters) {
+    if (!matchesMinimumTokens(character, filters.minimumTokens))
+      return false;
+    if (!filters.requireLorebook)
+      return true;
+    const cardPath = characterClientPath(character, "card");
+    if (!cardPath)
+      throw new Error("Datacat did not supply a card path for checking lorebooks.");
+    if (state.lorebookCache.has(cardPath))
+      return state.lorebookCache.get(cardPath);
+    const card = await datacatFetch(cardPath);
+    const hasLorebook = cardHasLorebook(card);
+    state.lorebookCache.set(cardPath, hasLorebook);
+    return hasLorebook;
+  }
+  async function verifyCatalogLorebooks() {
+    if (state.lorebookChecking || !state.requireLorebook)
+      return;
+    const popup = getVerificationLease() ? null : window.open(verificationPopupWaitingUrl(), "datacat-client-verification", "popup=yes,width=560,height=720");
+    state.lorebookChecking = true;
+    renderTagBrowser();
+    try {
+      await ensureImportVerification("catalog lorebooks", popup);
+      if (state.importFeedback?.tone === "verification")
+        setImportFeedback(null);
+      state.lorebookVerificationRequired = false;
+      state.error = "";
+      state.loadMoreError = "";
+      if (state.requireLorebook)
+        await loadCharacters();
+    } catch (error) {
+      setStatus(publicErrorMessage(error, error.code === "VERIFICATION_POPUP_BLOCKED" ? "Allow pop-ups for Lumiverse to complete the Datacat security check." : "Could not complete the lorebook security check. Try again."), true);
+    } finally {
+      closeVerificationPopup(popup);
+      if (state.importFeedback?.tone === "verification")
+        setImportFeedback(null);
+      state.lorebookChecking = false;
+      render();
+    }
   }
   async function loadCharacters({
     reset = false,
     preserveExisting = false
   } = {}) {
-    if (state.loading || state.loadingMore)
+    if (!reset && (state.loading || state.loadingMore))
       return;
     const serial = ++state.serial;
+    const isCurrent = () => serial === state.serial;
+    const filters = {
+      minimumTokens: state.minimumTokens,
+      requireLorebook: state.requireLorebook,
+      query: state.query,
+      catalogSort: state.catalogSort,
+      selectedTagIds: [...state.selectedTagIds],
+      blockedTagIds: [...state.blockedTagIds]
+    };
+    const existingCharacters = reset ? [] : state.characters;
+    let progress = null;
     state.error = "";
     state.loadMoreError = "";
     if (reset) {
       state.loading = true;
+      state.loadingMore = false;
+      state.offset = 0;
       state.hasMore = false;
+      state.catalogManualMore = false;
+      state.lorebookVerificationRequired = false;
+      if (!preserveExisting)
+        state.characters = [];
       catalogScroll.scrollTop = 0;
     } else {
       state.loadingMore = true;
@@ -4531,37 +4792,66 @@ function setup(ctx) {
     if (!preserveExisting)
       render();
     try {
-      const offset = reset ? 0 : state.offset;
-      const params = new URLSearchParams({
-        limit: String(PAGE_SIZE),
-        offset: String(offset),
-        sort: state.catalogSort
+      progress = await scanCatalogPages({
+        offset: reset ? 0 : state.offset,
+        pageSize: PAGE_SIZE,
+        maxPages: filters.minimumTokens !== null || filters.requireLorebook ? 3 : 1,
+        isCurrent,
+        fetchPage: (offset) => {
+          const params = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(offset), sort: filters.catalogSort });
+          if (filters.query)
+            params.set("search", filters.query);
+          if (filters.selectedTagIds.length)
+            params.set("tagIds", filters.selectedTagIds.join(","));
+          if (filters.blockedTagIds.length)
+            params.set("blockedTagIds", filters.blockedTagIds.join(","));
+          return datacatFetch(`/characters?${params}`);
+        },
+        matches: (character) => checkCatalogCharacter(character, filters),
+        onProgress: (next) => {
+          progress = next;
+        }
       });
-      if (state.query)
-        params.set("search", state.query);
-      if (state.selectedTagIds.size) {
-        params.set("tagIds", [...state.selectedTagIds].join(","));
-      }
-      const payload = await datacatFetch(`/characters?${params}`);
-      if (serial !== state.serial)
+      if (!isCurrent() || !progress)
         return;
-      const rows = Array.isArray(payload.characters) ? payload.characters : [];
-      state.characters = reset ? rows : [...state.characters, ...rows];
-      state.offset = Number(payload.paging?.nextOffset ?? offset + rows.length);
-      state.hasMore = payload.paging?.hasMore === true;
+      state.characters = appendUniqueCharacters(existingCharacters, progress.characters);
+      state.offset = progress.nextOffset;
+      state.hasMore = progress.hasMore;
+      state.catalogManualMore = progress.manualMore;
       updateCatalogStatus();
     } catch (error) {
+      if (!isCurrent())
+        return;
+      if (progress) {
+        state.characters = appendUniqueCharacters(existingCharacters, progress.characters);
+        state.offset = progress.nextOffset;
+        state.hasMore = progress.hasMore;
+      } else if (reset) {
+        state.characters = [];
+      }
+      if (error.verificationRequired && filters.requireLorebook) {
+        setVerificationLease(null);
+        state.lorebookVerificationRequired = true;
+        state.hasMore = true;
+        state.catalogManualMore = true;
+        state.loadMoreError = "";
+        state.error = "";
+        setStatus("Verify with Datacat to continue checking lorebooks.");
+        return;
+      }
       const message = error.retryAfter ? `${publicErrorMessage(error, "Could not load Datacat.")} Retry in ${error.retryAfter}s.` : publicErrorMessage(error, "Could not load Datacat.");
-      if (reset || state.characters.length === 0) {
+      if (state.characters.length === 0) {
         state.error = message;
       } else {
         state.loadMoreError = message;
       }
       setStatus(message, true);
     } finally {
-      state.loading = false;
-      state.loadingMore = false;
-      render();
+      if (isCurrent()) {
+        state.loading = false;
+        state.loadingMore = false;
+        render();
+      }
     }
   }
   function appendUniqueCharacters(existing, incoming) {
@@ -5361,6 +5651,17 @@ function setup(ctx) {
     }
   }
   root.addEventListener("input", (event) => {
+    if (event.target === minimumTokensInput) {
+      window.clearTimeout(catalogFilterTimer);
+      if (minimumTokensInput.validity.valid) {
+        catalogFilterTimer = window.setTimeout(updateQualityFilters, 300);
+      }
+      return;
+    }
+    if (event.target === requireLorebookInput) {
+      updateQualityFilters();
+      return;
+    }
     if (event.target === search) {
       state.query = search.value.trim().slice(0, 120);
       searchClear.hidden = !state.query;
@@ -5445,10 +5746,26 @@ function setup(ctx) {
       tagsToggle.focus();
       return;
     }
+    if (target.closest("[data-filter-verify]")) {
+      verifyCatalogLorebooks();
+      return;
+    }
+    if (target.closest("[data-minimum-tokens-clear]")) {
+      minimumTokensInput.value = "";
+      updateQualityFilters();
+      return;
+    }
+    if (target.closest("[data-lorebook-clear]")) {
+      requireLorebookInput.checked = false;
+      updateQualityFilters();
+      return;
+    }
     if (target.closest("[data-catalog-sentinel]")) {
-      if (state.viewMode === "fresh" && state.freshLoadMoreError) {
+      if (state.viewMode === "catalog" && state.lorebookVerificationRequired) {
+        verifyCatalogLorebooks();
+      } else if (state.viewMode === "fresh" && state.freshLoadMoreError) {
         loadFreshCharacters();
-      } else if (state.viewMode === "catalog" && state.loadMoreError) {
+      } else if (state.viewMode === "catalog" && (state.loadMoreError || state.catalogManualMore)) {
         loadCharacters();
       }
       return;
@@ -5484,24 +5801,21 @@ function setup(ctx) {
     const tagButton = target.closest("[data-tag-id]");
     if (tagButton) {
       const tagId = Number(tagButton.getAttribute("data-tag-id"));
-      const next = new Set(state.selectedTagIds);
-      if (next.has(tagId))
-        next.delete(tagId);
-      else
-        next.add(tagId);
-      updateSelectedTags(next);
+      try {
+        updateSelectedTags(changeTagPool(state, tagId, state.tagPool));
+      } catch (error) {
+        setStatus(error.message, true);
+      }
       return;
     }
     const removeTagButton = target.closest("[data-tag-remove]");
     if (removeTagButton) {
       const tagId = Number(removeTagButton.getAttribute("data-tag-remove"));
-      const next = new Set(state.selectedTagIds);
-      next.delete(tagId);
-      updateSelectedTags(next);
+      updateSelectedTags(changeTagPool(state, tagId, removeTagButton.dataset.pool, { remove: true }));
       return;
     }
     if (target.closest("[data-tags-clear]")) {
-      updateSelectedTags(new Set);
+      updateSelectedTags(createTagPools([], []));
       return;
     }
     if (target.closest("[data-tag-sort]")) {
@@ -5514,6 +5828,13 @@ function setup(ctx) {
       state.tagView = tagViewButton.getAttribute("data-tag-view") === "list" ? "list" : "cloud";
       saveTagViewMode(state.tagView);
       tagGroups.scrollTop = 0;
+      renderTagBrowser();
+      return;
+    }
+    const tagPoolButton = target.closest("[data-tag-pool]");
+    if (tagPoolButton) {
+      state.tagPool = tagPoolButton.dataset.tagPool === "block" ? "block" : "include";
+      saveTagPoolMode(state.tagPool);
       renderTagBrowser();
       return;
     }
@@ -5984,8 +6305,11 @@ function setup(ctx) {
     restorePersistedScroll();
   })();
   return () => {
+    state.serial += 1;
+    state.tagSerial += 1;
     window.clearTimeout(searchTimer);
     window.clearTimeout(tagSearchTimer);
+    window.clearTimeout(catalogFilterTimer);
     window.clearTimeout(linkPollTimer);
     window.clearTimeout(verificationPollTimer);
     window.clearTimeout(browserStateSaveTimer);

@@ -50,7 +50,7 @@ var DATACAT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a
 var DEFAULT_DATACAT_ORIGIN = "https://datacat.run";
 var DATACAT_API_PREFIX = "/api/client/v1";
 var DATACAT_CLIENT_ID = "datacat_lumiverse";
-var DATACAT_CLIENT_VERSION = "0.5.48";
+var DATACAT_CLIENT_VERSION = "0.5.49";
 var INSTALLATION_KEY = "datacat.installation_id";
 var ACCESS_TOKEN_KEY = "datacat.access_token";
 var VERIFICATION_LEASE_KEY = "datacat.verification_lease";
@@ -452,7 +452,7 @@ api.onFrontendMessage(async (payload, userId) => {
   }
 });
 export {
-  scanLinks,
+  datacatLink,
   getLinks,
-  datacatLink
+  scanLinks
 };

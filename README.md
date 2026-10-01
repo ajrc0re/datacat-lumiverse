@@ -10,6 +10,12 @@ you want, import it, and start chatting without leaving your app.
 
 - Discover new characters in Fresh, or search and filter the full catalogue.
 - Explore tags and creator profiles to find more of what you like.
+- In the Tags drawer, switch between **Include** and **Block** beside List/Cloud.
+  Include requires every selected tag; Block hides cards with any blocked tag.
+  Selecting a tag in the other pool moves it there. Both pools work together.
+- Set **Minimum tokens** to hide shorter cards, or turn on **Require lorebook**
+  to keep cards containing an embedded lorebook with nonempty entries. Clear
+  either filter with its chip above the catalog. Filters survive a page reload.
 - Import a character directly into Lumiverse, then open a chat immediately.
 - Keep track of your most recent imports in one compact list.
 - Leave kudos and comments through your connected Datacat account.
@@ -25,6 +31,16 @@ you want, import it, and start chatting without leaving your app.
 When Lumiverse asks you to connect an account or complete a quick verification,
 follow the Datacat page and return to Lumiverse when it finishes. You can then
 continue browsing and importing normally.
+
+Datacat's Client API does not currently expose token filtering or lorebook
+availability in discovery results. Minimum tokens uses the reported total token
+count while continuing through server pages. Require lorebook checks card JSON
+through the existing protected card endpoint and caches only the result for the
+current browser session. Use **Verify to check lorebooks** when prompted; these
+checks share Datacat's card-transfer allowance (currently 20 distinct characters
+per verification lease). Standalone lorebooks that are not embedded in the card
+are not counted. The extension scans up to three catalog pages at a time; use
+**Load more matching cards** to continue a sparse search.
 
 ## For app and extension developers
 
